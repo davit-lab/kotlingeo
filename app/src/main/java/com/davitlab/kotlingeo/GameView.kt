@@ -2,6 +2,7 @@ package com.davitlab.kotlingeo
 
 import android.content.Context
 import android.graphics.*
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.*
@@ -9,135 +10,38 @@ import kotlin.random.Random
 
 /** Native Kotlin renderer/game loop. Logical resolution remains exactly 960x540. */
 class GameView(context: Context) : View(context) {
-    private val W = GameConfig.LOGICAL_WIDTH
-    private val H = GameConfig.LOGICAL_HEIGHT
-    private val G = GameConfig.GROUND_Y
-    private val gravity = GameConfig.GRAVITY
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val path = Path()
-    private var scale = 1f
-    private var ox = 0f
-    private var oy = 0f
-    private var lastNs = System.nanoTime()
-    private var time = 0f
-    private var camX = 0f
-
-    private enum class Mode { MENU, PLAYING, PAUSED, GAME_OVER, LEVEL_CLEAR, WIN }
-    private var mode = Mode.MENU
-    private var levelIndex = 0
-    private var level = GeoLevels.all[0]
-    private var score = 0
-    private var lives = GameConfig.MAX_LIVES
-    private var subs = 0
-
-    private var left = false
-    private var right = false
-    private var jump = false
-    private var previousJump = false
-
-    private val player = GameRect(60f, G - 52f, 34f, 52f)
-    private var vx = 0f
-    private var vy = 0f
-    private var onGround = false
-    private var facing = 1
-    private var anim = 0f
-    private var invuln = 0
-    private var crying = 0
-    private var slipping = 0
-
-    private data class GameRect(var x: Float, var y: Float, var w: Float, var h: Float) {
-        val right get() = x + w
-        val bottom get() = y + h
-    }
-    private data class Item(val r: GameRect, var used: Boolean = false)
+    private val W=GameConfig.LOGICAL_WIDTH; private val H=GameConfig.LOGICAL_HEIGHT; private val G=GameConfig.GROUND_Y; private val gravity=GameConfig.GRAVITY
+    private val paint=Paint(Paint.ANTI_ALIAS_FLAG); private val path=Path(); private var scale=1f; private var ox=0f; private var oy=0f; private var lastNs=System.nanoTime(); private var time=0f; private var camX=0f
+    private enum class Mode{MENU,PLAYING,PAUSED,GAME_OVER,LEVEL_CLEAR,WIN}; private var mode=Mode.MENU; private var levelIndex=0; private var level=GeoLevels.all[0]; private var score=0; private var lives=3; private var subs=0
+    private var left=false;private var right=false;private var jump=false;private var previousJump=false
+    private data class GameRect(var x:Float,var y:Float,var w:Float,var h:Float){val right get()=x+w;val bottom get()=y+h}
+    private data class Item(val r:GameRect,var used:Boolean=false)
     private data class Zombie(var x:Float,var y:Float,var w:Float,var h:Float,var hp:Int,var maxHp:Int,var speed:Float,var size:Float,var color:Int,var vx:Float=0f,var vy:Float=0f,var facing:Int=1,var anim:Float=0f)
     private data class Bullet(var x:Float,var y:Float,var vx:Float,var life:Int=60)
     private data class Particle(var x:Float,var y:Float,var vx:Float,var vy:Float,var life:Float,var color:Int,var size:Float)
-
-    private val coins = mutableListOf<Item>()
-    private val bells = mutableListOf<Item>()
-    private val bananas = mutableListOf<Item>()
-    private val bushes = mutableListOf<Item>()
-    private val fakeHits = mutableMapOf<WorldRect,Boolean>()
-    private val coinRects = mutableListOf<Item>()
-    private val bellRects = mutableListOf<Item>()
-    private val zombies = mutableListOf<Zombie>()
-    private val bullets = mutableListOf<Bullet>()
-    private val particles = mutableListOf<Particle>()
-    private val jumpBoxes = mutableListOf<JumpBox>()
-    private var flash = 0f
-    private var shake = 0f
-    private var toast = ""
-    private var toastTimer = 0f
-    private var jumpscare = 0f
-
-    init { isFocusable = true; loadLevel(0) }
-
-    private fun loadLevel(index:Int) {
-        levelIndex = index.coerceIn(0, GeoLevels.all.lastIndex)
-        level = GeoLevels.all[levelIndex]
-        coins.clear(); bells.clear(); bananas.clear(); bushes.clear(); coinRects.clear(); bellRects.clear(); fakeHits.clear(); jumpBoxes.clear(); zombies.clear(); bullets.clear(); particles.clear()
-        level.coins.forEach { coins += Item(GameRect(it.x,it.y,it.w,it.h)); coinRects += coins.last() }
-        level.bells.forEach { bells += Item(GameRect(it.x,it.y,it.w,it.h)); bellRects += bells.last() }
-        level.bananas.forEach { bananas += Item(GameRect(it.x,it.y,it.w,it.h)) }
-        level.bushes.forEach { bushes += Item(GameRect(it.x,it.y,it.w,it.h)) }
-        level.fakeSpikes.forEach { fakeHits[it] = false }
-        level.jumpBoxes.forEach { jumpBoxes += JumpBox(WorldRect(it.rect.x,it.rect.y,it.rect.w,it.rect.h),it.type) }
-        level.zombieSpawns.forEach { spawnZombie(it.x,it.y) }
-        resetPlayer(); camX = 0f
-    }
-
-    private fun resetPlayer() { player.x=level.spawn.x; player.y=level.spawn.y; vx=0f; vy=0f; onGround=false; facing=1; invuln=90; crying=0; slipping=0 }
-    private fun startGame() { score=0; lives=3; subs=0; loadLevel(0); mode=Mode.PLAYING }
-    private fun restart() { score=0; lives=3; subs=0; loadLevel(levelIndex); mode=Mode.PLAYING }
-    private fun toast(s:String,seconds:Float=1.2f){toast=s;toastTimer=seconds}
-    private fun hurt(){ if(invuln>0)return; lives--; crying=60; invuln=90; shake=14f; flash=.5f; if(lives<=0){mode=Mode.GAME_OVER}else{resetPlayer();camX=0f} }
-    private fun spawnZombie(x:Float,y:Float){ val r=Random.nextFloat(); val hp=if(r<.3f)1 else if(r<.7f)2 else 4; val sp=if(r<.3f)2.2f else if(r<.7f)1.5f else .8f; val size=if(r<.3f).9f else if(r<.7f)1f else 1.2f; val color=if(r<.3f)Color.rgb(106,155,106) else if(r<.7f)Color.rgb(74,139,74) else Color.rgb(58,123,58); zombies += Zombie(x,y,36f*size,54f*size,hp,hp,sp,size,color) }
-    private fun shoot(){ if(mode!=Mode.PLAYING)return; bullets += Bullet(player.x+player.w/2,player.y+player.h/2,facing*GameConfig.BULLET_SPEED); repeat(5){particles += Particle(player.x+player.w/2,player.y+player.h/2,(Random.nextFloat()-.5f)*8f,(Random.nextFloat()-.5f)*8f-3f,50f,Color.rgb(255,210,63),3f+Random.nextFloat()*4f)}; shake=3f }
-
-    override fun onDraw(c:Canvas){
-        super.onDraw(c); scale=min(width/W,height/H); ox=(width-W*scale)/2f; oy=(height-H*scale)/2f
-        val now=System.nanoTime(); val dt=((now-lastNs)/1_000_000_000f).coerceIn(0f,.033f); lastNs=now; time+=dt; anim+=dt*1000f
-        c.save(); c.translate(ox,oy); c.scale(scale,scale)
-        if(mode==Mode.PLAYING) update(dt)
-        if(shake>.2f){c.translate((Random.nextFloat()-.5f)*shake,(Random.nextFloat()-.5f)*shake);shake*=.85f}
-        drawBackground(c,level.bgHue); drawWorld(c); drawHud(c)
-        when(mode){Mode.MENU->drawMenu(c);Mode.PAUSED->drawOverlay(c,"PAUSED");Mode.GAME_OVER->drawOverlay(c,"GAME OVER");Mode.LEVEL_CLEAR->drawLevelClear(c);Mode.WIN->drawWin(c);else->Unit}
-        if(flash>.01f){paint.color=Color.argb((flash*255).toInt(),255,60,90);c.drawRect(0f,0f,W,H,paint);flash*=.86f}
-        c.restore(); postInvalidateOnAnimation()
-    }
-
-    private fun update(dt:Float){
-        if(invuln>0)invuln--; if(crying>0)crying--; if(toastTimer>0)toastTimer-=dt; if(jumpscare>0)jumpscare-=dt
-        val speed=4.4f
-        if(slipping>0){slipping--;vx=facing*7f*(slipping/40f)} else {vx=when{left&&!right->-speed;right&&!left->speed;else->vx*.8f};if(abs(vx)>.2f)facing=if(vx>0)1 else -1}
-        if(jump&&!previousJump&&onGround){vy=-13.5f;onGround=false};previousJump=jump
-        vy=(vy+gravity).coerceAtMost(18f); player.x+=vx;player.y+=vy
-        if(player.x<camX+4)player.x=camX+4
-        onGround=false
-        for(p in level.plats){val r=GameRect(p.x,p.y,p.w,p.h);if(overlap(player,r)){val prev=player.y-vy+player.h;if(vy>=0&&prev<=p.y+2){player.y=p.y-player.h;vy=0f;onGround=true}else if(vy<0&&player.y-vy>=p.bottom-2){player.y=p.bottom;vy=1f}else{if(vx>0)player.x=p.x-player.w else if(vx<0)player.x=p.right;vx=0f}}}
-        if(player.y>H+200)hurt()
-        for(s in level.spikes)if(overlap(player,GameRect(s.x,s.y,s.w,s.h)))hurt()
-        for(i in bananas.indices)if(!bananas[i].used&&overlap(player,bananas[i].r)){bananas[i].used=true;slipping=40;toast("ბანანის კალთა! უუუ 🍌")}
-        for(i in coins.indices)if(!coins[i].used&&overlap(player,coins[i].r)){coins[i].used=true;score+=10}
-        for(i in bells.indices)if(!bells[i].used&&overlap(player,bells[i].r)){bells[i].used=true;score+=50;subs=min(100,subs+15);toast("+15% გამოწერები 🔔")}
-        for(i in level.fakeSpikes.indices){val f=level.fakeSpikes[i];if(overlap(player,GameRect(f.x,f.y,f.w,f.h))&&fakeHits[f]!=true){fakeHits[f]=true;toast("დაისვენე, ეს ბალიშია 🛏️")}}
-        for(j in jumpBoxes){if(!j.hit&&overlap(player,GameRect(j.rect.x,j.rect.y,j.rect.w,j.rect.h))){val prevTop=player.y-vy;if(vy<0&&prevTop>=j.rect.bottom-5){j.hit=true;if(j.type==BonusType.COIN){score+=30;toast("+30 ქულა! 💰")}else{score+=100;subs=min(100,subs+20);toast("+20% გამოწერები! 🔔")};shake=5f}}}
-        for(i in bushes.indices)if(!bushes[i].used){val b=bushes[i].r;val zone=GameRect(b.x-40,b.y-60,b.w+80,b.h+60);if(overlap(player,zone)){bushes[i].used=true;jumpscare=.6f;shake=20f;flash=.85f}}
-        updateZombies(dt);updateBullets();updateParticles();camX=max(0f,min(level.width-W,player.x-W*.38f));if(overlap(player,GameRect(level.flag.x,level.flag.y,level.flag.w,level.flag.h)))levelClear()
-    }
-
-    private fun updateZombies(dt:Float){for(i in zombies.indices.reversed()){val z=zombies[i];z.anim+=dt*1000f;var platform:WorldRect?=null;for(p in level.plats){if(overlap(GameRect(z.x,z.y,z.w,z.h),GameRect(p.x,p.y,p.w,p.h))&&z.vy>=0){val prev=z.y+z.h-z.vy;if(prev<=p.y+2){z.y=p.y-z.h;z.vy=0f;platform=p}}};val dx=player.x-z.x;val dy=player.y-z.y;val dist=sqrt(dx*dx+dy*dy);if(platform!=null&&dist<500&&dist>30){val dir=if(dx>0)1 else -1;val nx=z.x+dir*20;if(nx>=platform.x&&nx+z.w<=platform.right){z.vx=(dx/dist)*z.speed;z.facing=dir}else z.vx*=.8f}else z.vx*=.9f;z.x+=z.vx;z.vy=(z.vy+gravity).coerceAtMost(18f);z.y+=z.vy;if(z.y>H+200){zombies.removeAt(i);continue};if(overlap(player,GameRect(z.x,z.y,z.w,z.h)))hurt();if(z.hp<=0){score+=z.maxHp*15;repeat(15){particles+=Particle(z.x+z.w/2,z.y+z.h/2,(Random.nextFloat()-.5f)*8f,(Random.nextFloat()-.5f)*8f-3f,50f,z.color,3f+Random.nextFloat()*4f)};zombies.removeAt(i)}}}
-    private fun updateBullets(){for(i in bullets.indices.reversed()){val b=bullets[i];b.x+=b.vx;b.life--;var hit=false;for(z in zombies){if(overlap(GameRect(b.x-4,b.y-4,8f,8f),GameRect(z.x,z.y,z.w,z.h))){z.hp--;hit=true;break}};if(hit||b.life<=0||b.x<camX-50||b.x>camX+W+50)bullets.removeAt(i)}}
+    private val player=GameRect(60f,G-52f,34f,52f);private var vx=0f;private var vy=0f;private var onGround=false;private var facing=1;private var anim=0f;private var invuln=0;private var crying=0;private var slipping=0
+    private val coins=mutableListOf<Item>();private val bells=mutableListOf<Item>();private val bananas=mutableListOf<Item>();private val bushes=mutableListOf<Item>();private val fakeHits=mutableMapOf<WorldRect,Boolean>();private val zombies=mutableListOf<Zombie>();private val bullets=mutableListOf<Bullet>();private val particles=mutableListOf<Particle>();private val jumpBoxes=mutableListOf<JumpBox>()
+    private var flash=0f;private var shake=0f;private var toast="";private var toastTimer=0f;private var jumpscare=0f
+    init{isFocusable=true;loadLevel(0);requestFocus()}
+    private fun loadLevel(index:Int){levelIndex=index.coerceIn(0,GeoLevels.all.lastIndex);level=GeoLevels.all[levelIndex];coins.clear();bells.clear();bananas.clear();bushes.clear();fakeHits.clear();jumpBoxes.clear();zombies.clear();bullets.clear();particles.clear();level.coins.forEach{coins+=Item(GameRect(it.x,it.y,it.w,it.h))};level.bells.forEach{bells+=Item(GameRect(it.x,it.y,it.w,it.h))};level.bananas.forEach{bananas+=Item(GameRect(it.x,it.y,it.w,it.h))};level.bushes.forEach{bushes+=Item(GameRect(it.x,it.y,it.w,it.h))};level.fakeSpikes.forEach{fakeHits[it]=false};level.jumpBoxes.forEach{jumpBoxes+=JumpBox(WorldRect(it.rect.x,it.rect.y,it.rect.w,it.rect.h),it.type)};level.zombieSpawns.forEach{spawnZombie(it.x,it.y)};resetPlayer();camX=0f}
+    private fun resetPlayer(){player.x=level.spawn.x;player.y=level.spawn.y;vx=0f;vy=0f;onGround=false;facing=1;invuln=90;crying=0;slipping=0}
+    private fun startGame(){score=0;lives=3;subs=0;loadLevel(0);mode=Mode.PLAYING}
+    private fun restart(){score=0;lives=3;subs=0;loadLevel(levelIndex);mode=Mode.PLAYING}
+    private fun toast(s:String,sec:Float=1.2f){toast=s;toastTimer=sec}
+    private fun hurt(){if(invuln>0)return;lives--;crying=60;invuln=90;shake=14f;flash=.5f;if(lives<=0)mode=Mode.GAME_OVER else{resetPlayer();camX=0f}}
+    private fun spawnZombie(x:Float,y:Float){val r=Random.nextFloat();val hp=if(r<.3f)1 else if(r<.7f)2 else 4;val sp=if(r<.3f)2.2f else if(r<.7f)1.5f else .8f;val sz=if(r<.3f).9f else if(r<.7f)1f else 1.2f;val col=if(r<.3f)Color.rgb(106,155,106)else if(r<.7f)Color.rgb(74,139,74)else Color.rgb(58,123,58);zombies+=Zombie(x,y,36f*sz,54f*sz,hp,hp,sp,sz,col)}
+    private fun shoot(){if(mode!=Mode.PLAYING)return;bullets+=Bullet(player.x+17,player.y+26,facing*12f);repeat(5){particles+=Particle(player.x+17,player.y+26,(Random.nextFloat()-.5f)*8f,(Random.nextFloat()-.5f)*8f-3f,50f,Color.rgb(255,210,63),3f+Random.nextFloat()*4f)};shake=3f}
+    override fun onDraw(c:Canvas){super.onDraw(c);scale=min(width/W,height/H);ox=(width-W*scale)/2f;oy=(height-H*scale)/2f;val now=System.nanoTime();val dt=((now-lastNs)/1_000_000_000f).coerceIn(0f,.033f);lastNs=now;time+=dt;anim+=dt*1000f;c.save();c.translate(ox,oy);c.scale(scale,scale);if(mode==Mode.PLAYING)update(dt);if(shake>.2f){c.translate((Random.nextFloat()-.5f)*shake,(Random.nextFloat()-.5f)*shake);shake*=.85f};drawBackground(c,level.bgHue);drawWorld(c);drawHud(c);when(mode){Mode.MENU->drawMenu(c);Mode.PAUSED->drawOverlay(c,"PAUSED");Mode.GAME_OVER->drawOverlay(c,"GAME OVER");Mode.LEVEL_CLEAR->drawLevelClear(c);Mode.WIN->drawWin(c);else->Unit};if(flash>.01f){paint.color=Color.argb((flash*255).toInt(),255,60,90);c.drawRect(0f,0f,W,H,paint);flash*=.86f};c.restore();postInvalidateOnAnimation()}
+    private fun update(dt:Float){if(invuln>0)invuln--;if(crying>0)crying--;if(toastTimer>0)toastTimer-=dt;if(jumpscare>0)jumpscare-=dt;val speed=4.4f;if(slipping>0){slipping--;vx=facing*7f*(slipping/40f)}else{vx=when{left&&!right->-speed;right&&!left->speed;else->vx*.8f};if(abs(vx)>.2f)facing=if(vx>0)1 else -1};if(jump&&!previousJump&&onGround){vy=-13.5f;onGround=false};previousJump=jump;vy=(vy+gravity).coerceAtMost(18f);player.x+=vx;player.y+=vy;if(player.x<camX+4)player.x=camX+4;onGround=false;for(p in level.plats){val r=GameRect(p.x,p.y,p.w,p.h);if(overlap(player,r)){val prev=player.y-vy+player.h;if(vy>=0&&prev<=p.y+2){player.y=p.y-player.h;vy=0f;onGround=true}else if(vy<0&&player.y-vy>=p.bottom-2){player.y=p.bottom;vy=1f}else{if(vx>0)player.x=p.x-player.w else if(vx<0)player.x=p.right;vx=0f}}};if(player.y>H+200)hurt();for(s in level.spikes)if(overlap(player,GameRect(s.x,s.y,s.w,s.h)))hurt();for(b in bananas)if(!b.used&&overlap(player,b.r)){b.used=true;slipping=40;toast("ბანანის კალთა! უუუ 🍌")};for(c in coins)if(!c.used&&overlap(player,c.r)){c.used=true;score+=10};for(b in bells)if(!b.used&&overlap(player,b.r)){b.used=true;score+=50;subs=min(100,subs+15);toast("+15% გამოწერები 🔔")};for(f in level.fakeSpikes)if(overlap(player,GameRect(f.x,f.y,f.w,f.h))&&fakeHits[f]!=true){fakeHits[f]=true;toast("დაისვენე, ეს ბალიშია 🛏️")};for(j in jumpBoxes)if(!j.hit&&overlap(player,GameRect(j.rect.x,j.rect.y,j.rect.w,j.rect.h))){val prevTop=player.y-vy;if(vy<0&&prevTop>=j.rect.bottom-5){j.hit=true;if(j.type==BonusType.COIN){score+=30;toast("+30 ქულა! 💰")}else{score+=100;subs=min(100,subs+20);toast("+20% გამოწერები! 🔔")};shake=5f}};for(b in bushes)if(!b.used){val r=b.r;if(overlap(player,GameRect(r.x-40,r.y-60,r.w+80,r.h+60))){b.used=true;jumpscare=.6f;shake=20f;flash=.85f}};updateZombies(dt);updateBullets();updateParticles();camX=max(0f,min(level.width-W,player.x-W*.38f));if(overlap(player,GameRect(level.flag.x,level.flag.y,level.flag.w,level.flag.h)))levelClear()}
+    private fun levelClear(){if(mode!=Mode.PLAYING)return;mode=Mode.LEVEL_CLEAR;postDelayed({if(levelIndex<GeoLevels.all.lastIndex){loadLevel(levelIndex+1);mode=Mode.PLAYING}else mode=Mode.WIN},1800)}
+    private fun updateZombies(dt:Float){for(i in zombies.indices.reversed()){val z=zombies[i];z.anim+=dt*1000f;var platform:WorldRect?=null;for(p in level.plats)if(overlap(GameRect(z.x,z.y,z.w,z.h),GameRect(p.x,p.y,p.w,p.h))&&z.vy>=0){val prev=z.y+z.h-z.vy;if(prev<=p.y+2){z.y=p.y-z.h;z.vy=0f;platform=p}};val dx=player.x-z.x;val dy=player.y-z.y;val dist=sqrt(dx*dx+dy*dy);if(platform!=null&&dist<500&&dist>30){val dir=if(dx>0)1 else -1;val nx=z.x+dir*20;if(nx>=platform.x&&nx+z.w<=platform.right){z.vx=(dx/dist)*z.speed;z.facing=dir}else z.vx*=.8f}else z.vx*=.9f;z.x+=z.vx;z.vy=(z.vy+gravity).coerceAtMost(18f);z.y+=z.vy;if(z.y>H+200){zombies.removeAt(i);continue};if(overlap(player,GameRect(z.x,z.y,z.w,z.h)))hurt();if(z.hp<=0){score+=z.maxHp*15;zombies.removeAt(i)}}}
+    private fun updateBullets(){for(i in bullets.indices.reversed()){val b=bullets[i];b.x+=b.vx;b.life--;var hit=false;for(z in zombies)if(overlap(GameRect(b.x-4,b.y-4,8f,8f),GameRect(z.x,z.y,z.w,z.h))){z.hp--;hit=true;break};if(hit||b.life<=0||b.x<camX-50||b.x>camX+W+50)bullets.removeAt(i)}}
     private fun updateParticles(){for(i in particles.indices.reversed()){val p=particles[i];p.x+=p.vx;p.y+=p.vy;p.vy+=.3f;p.life--;p.size*=.95f;if(p.life<=0||p.size<.5f)particles.removeAt(i)}}
-    private fun overlap(a:GameRect,b:GameRect)=a.x<b.right&&a.right>b.x&&a.y<b.bottom&&a.bottom>b.y
-    private fun visible(r:WorldRect)=r.right-camX>=-100&&r.x-camX<=W+100
-
+    private fun visible(r:WorldRect)=r.right-camX>=-100&&r.x-camX<=W+100;private fun overlap(a:GameRect,b:GameRect)=a.x<b.right&&a.right>b.x&&a.y<b.bottom&&a.bottom>b.y
     private fun drawBackground(c:Canvas,hue:String){val top=if(hue=="pink")Color.rgb(42,16,48)else Color.rgb(13,27,51);val bot=if(hue=="pink")Color.rgb(90,20,64)else Color.rgb(18,58,94);paint.shader=LinearGradient(0f,0f,0f,H,top,bot,Shader.TileMode.CLAMP);c.drawRect(0f,0f,W,H,paint);paint.shader=null;paint.color=if(hue=="pink")Color.argb(38,255,61,110)else Color.argb(38,56,198,255);for(layer in 0..2){val sp=.2f+layer*.1f;for(i in -1..5){val x=((i*300f-camX*sp)%1800f+1800f)%1800f;c.drawOval(x+150f-220f+layer*30f,G+30f+layer*20f-90f+layer*15f,x+150f+220f-layer*30f,G+30f+layer*20f,paint)}};paint.color=Color.argb(153,255,255,255);for(i in 0 until 50){val x=((i*137f-camX*.15f)%W+W)%W;val y=(i*53f)%(G-40f);paint.alpha=((sin(time*3+i)*.3+.7)*255).toInt();c.drawRect(x,y+10,x+2,y+12,paint)};paint.alpha=255}
-
-    private fun drawWorld(c:Canvas){for(p in level.plats)drawPlatform(c,p);for(s in level.signs)drawSign(c,s);for(f in level.fakeSpikes)drawFake(c,f);for(s in level.spikes)drawSpike(c,s);for(i in bananas.indices)drawBanana(c,bananas[i]);for(i in coins.indices)drawCoin(c,coins[i]);for(i in bells.indices)drawBell(c,bells[i]);for(i in bushes.indices)drawBush(c,bushes[i]);drawFlag(c,level.flag);for(z in zombies)drawZombie(c,z);for(b in bullets)drawBullet(c,b);drawParticles(c);drawPlayer(c)}
+    private fun drawWorld(c:Canvas){level.plats.forEach{drawPlatform(c,it)};level.signs.forEach{drawSign(c,it)};level.fakeSpikes.forEach{drawFake(c,it)};level.spikes.forEach{drawSpike(c,it)};bananas.forEach{drawBanana(c,it)};coins.forEach{drawCoin(c,it)};bells.forEach{drawBell(c,it)};bushes.forEach{drawBush(c,it)};drawFlag(c,level.flag);zombies.forEach{drawZombie(c,it)};bullets.forEach{drawBullet(c,it)};drawParticles(c);drawPlayer(c)}
     private fun drawPlatform(c:Canvas,p:WorldRect){if(!visible(p))return;val x=p.x-camX;paint.shader=LinearGradient(0f,p.y,0f,p.bottom,Color.rgb(79,214,123),Color.rgb(83,60,39),Shader.TileMode.CLAMP);c.drawRect(x,p.y,x+p.w,p.bottom,paint);paint.shader=null;paint.color=Color.rgb(95,214,139);for(i in 0 until p.w.toInt() step 20)if((i+camX.toInt())%30==0){path.reset();path.moveTo(x+i,p.y);path.lineTo(x+i+5,p.y-8);path.lineTo(x+i+10,p.y);path.close();c.drawPath(path,paint)}}
-    private fun drawSign(c:Canvas,s:LevelSign){val x=s.x-camX;if(x< -150||x>W+50)return;paint.color=Color.rgb(138,90,42);c.drawRect(x+18,G-50,x+26,G,paint);paint.color=Color.rgb(232,199,122);c.drawRect(x,G-70,x+60,G-44,paint);paint.color=Color.rgb(42,26,8);paint.textSize=9f;paint.textAlign=Paint.Align.CENTER;c.drawText(s.text.take(12),x+30,G-54,paint)}
+    private fun drawSign(c:Canvas,s:LevelSign){val x=s.x-camX;if(x<-150||x>W+50)return;paint.color=Color.rgb(138,90,42);c.drawRect(x+18,G-50,x+26,G,paint);paint.color=Color.rgb(232,199,122);c.drawRect(x,G-70,x+60,G-44,paint);paint.color=Color.rgb(42,26,8);paint.textSize=9f;paint.textAlign=Paint.Align.CENTER;c.drawText(s.text.take(12),x+30,G-54,paint)}
     private fun drawFake(c:Canvas,f:WorldRect){val x=f.x-camX;if(!visible(f))return;if(fakeHits[f]==true){paint.color=Color.rgb(255,230,240);c.drawOval(x,f.y,x+f.w,f.y+f.h*2,paint)}else{paint.color=Color.rgb(216,216,224);repeat(4){i->path.reset();path.moveTo(x+i*f.w/4,f.y+f.h);path.lineTo(x+i*f.w/4+f.w/8,f.y);path.lineTo(x+(i+1)*f.w/4,f.y+f.h);path.close();c.drawPath(path,paint)}}}
     private fun drawSpike(c:Canvas,s:WorldRect){val x=s.x-camX;if(!visible(s))return;paint.color=Color.rgb(255,61,110);repeat(4){i->path.reset();path.moveTo(x+i*s.w/4,s.y+s.h);path.lineTo(x+i*s.w/4+s.w/8,s.y-6);path.lineTo(x+(i+1)*s.w/4,s.y+s.h);path.close();c.drawPath(path,paint)}}
     private fun drawBanana(c:Canvas,i:Item){if(i.used)return;val x=i.r.x-camX;if(x>W||x+i.r.w<0)return;paint.color=Color.rgb(255,210,63);c.drawOval(x,i.r.y,x+i.r.w,i.r.bottom,paint)}
@@ -147,15 +51,14 @@ class GameView(context: Context) : View(context) {
     private fun drawFlag(c:Canvas,f:WorldRect){val x=f.x-camX;if(x>W||x+f.w<0)return;paint.color=Color.rgb(207,207,207);c.drawRect(x+13,f.y,x+17,f.bottom,paint);paint.color=Color.rgb(255,61,110);path.reset();path.moveTo(x+17,f.y+6);path.lineTo(x+61,f.y+16);path.lineTo(x+17,f.y+30);path.close();c.drawPath(path,paint);paint.color=Color.WHITE;paint.textSize=10f;paint.textAlign=Paint.Align.CENTER;c.drawText("გამოწერე",x+39,f.y+19,paint)}
     private fun drawZombie(c:Canvas,z:Zombie){val x=z.x-camX;if(x+z.w<0||x>W)return;c.save();c.translate(x+z.w/2,z.y+z.h/2);c.scale(z.facing*z.size,z.size);val wob=sin(z.anim*.03f)*2;paint.color=z.color;c.drawRect(-12,z.h*.1f+wob,12,z.h*.1f+wob+30,paint);c.drawOval(-14,-25,14,5,paint);paint.color=Color.RED;c.drawCircle(-5,-12,3,paint);c.drawCircle(5,-12,3,paint);paint.color=Color.rgb(42,74,42);c.drawOval(-6,-6,6,2,paint);paint.color=z.color;c.drawRect(-18,z.h*.1f+wob,-12,z.h*.1f+wob+20,paint);c.drawRect(12,z.h*.1f+wob,18,z.h*.1f+wob+20,paint);paint.color=Color.rgb(58,123,58);val lw=sin(z.anim*.04f)*3;c.drawRect(-10,z.h*.35f+wob+lw,-2,z.h*.35f+wob+lw+18,paint);c.drawRect(2,z.h*.35f+wob-lw,10,z.h*.35f+wob-lw+18,paint);paint.color=Color.argb(128,0,0,0);c.drawRect(-15,-35,15,-29,paint);paint.color=Color.rgb(255,61,110);c.drawRect(-15,-35,30*(z.hp.toFloat()/z.maxHp)-15,-29,paint);c.restore()}
     private fun drawBullet(c:Canvas,b:Bullet){val x=b.x-camX;if(x<0||x>W)return;paint.color=Color.rgb(255,210,63);c.drawCircle(x,b.y,5,paint);paint.color=Color.argb(128,255,210,63);c.drawCircle(x-b.vx*2,b.y,3,paint)}
-    private fun drawParticles(c:Canvas){for(p in particles){val x=p.x-camX;if(x< -50||x>W+50)continue;paint.alpha=(p.life/60*255).toInt().coerceIn(0,255);paint.color=p.color;c.drawCircle(x,p.y,p.size,paint)}paint.alpha=255}
+    private fun drawParticles(c:Canvas){for(p in particles){val x=p.x-camX;if(x<-50||x>W+50)continue;paint.alpha=(p.life/60*255).toInt().coerceIn(0,255);paint.color=p.color;c.drawCircle(x,p.y,p.size,paint)}paint.alpha=255}
     private fun drawPlayer(c:Canvas){val x=player.x-camX;c.save();c.translate(x+17,player.y+26);c.scale(facing.toFloat(),1f);if(invuln>0&&invuln/4%2==0)paint.alpha=102;val running=abs(vx)>.5&&onGround;val run=if(running)sin(anim*.02)*10 else 0;paint.color=Color.rgb(139,92,246);c.drawRect(-10,9+run,-2,31+run,paint);c.drawRect(2,9-run,10,31-run,paint);paint.color=Color.rgb(255,61,110);path.reset();path.moveTo(-14,9);path.lineTo(-16,-8);path.quadTo(0,-16,16,-8);path.lineTo(14,9);path.close();c.drawPath(path,paint);paint.color=Color.rgb(255,61,110);c.drawRect(-18,-6,-11,14,paint);c.drawRect(11,-6,18,14,paint);paint.color=Color.rgb(63,199,234);c.drawOval(-13,-34,13,-6,paint);paint.color=Color.rgb(13,36,54);c.drawRect(-13,-30,13,-23,paint);paint.color=Color.rgb(234,255,255);c.drawOval(-8,-24,-1,-19,paint);c.drawOval(1,-24,8,-19,paint);paint.color=Color.rgb(11,14,20);c.drawCircle(-4,-21.5f,1.6f,paint);c.drawCircle(5,-21.5f,1.6f,paint);paint.style=Paint.Style.STROKE;paint.strokeWidth=2f;c.drawLine(-9,-29,-2,-27,paint);c.drawLine(9,-29,2,-27,paint);paint.style=Paint.Style.FILL;paint.color=Color.rgb(42,42,42);c.drawRect(14,0,38,8,paint);c.drawRect(32,-2,40,10,paint);paint.color=Color.rgb(255,210,63);c.drawRect(38,2,41,6,paint);if(crying>0){paint.color=Color.rgb(56,198,255);c.drawOval(-8,-14,-4,-6,paint);c.drawOval(4,-14,8,-6,paint)}paint.color=Color.rgb(11,14,20);c.drawOval(-5,-17,5,-9,paint);paint.alpha=255;c.restore()}
-    private fun drawHud(c:Canvas){paint.color=Color.WHITE;paint.textSize=16f;paint.textAlign=Paint.Align.LEFT;c.drawText("❤ $lives",18,28,paint);c.drawText("Score: $score",18,50,paint);c.drawText("🔔 $subs%",18,72,paint);paint.textAlign=Paint.Align.RIGHT;c.drawText("K = სროლა",W-18,28,paint);paint.textAlign=Paint.Align.CENTER;c.drawText(level.name,W/2,25,paint);if(toastTimer>0){paint.textSize=16f;c.drawText(toast,W/2,H-24,paint)}}
+    private fun drawHud(c:Canvas){paint.color=Color.WHITE;paint.textSize=16f;paint.textAlign=Paint.Align.LEFT;c.drawText("❤ $lives",18,28,paint);c.drawText("Score: $score",18,50,paint);c.drawText("🔔 $subs%",18,72,paint);paint.textAlign=Paint.Align.RIGHT;c.drawText("K = სროლა",W-18,28,paint);paint.textAlign=Paint.Align.CENTER;c.drawText(level.name,W/2,25,paint);if(toastTimer>0)c.drawText(toast,W/2,H-24,paint)}
     private fun drawMenu(c:Canvas){paint.color=Color.argb(190,11,14,20);c.drawRect(0f,0f,W,H,paint);paint.color=Color.WHITE;paint.textAlign=Paint.Align.CENTER;paint.textSize=34f;c.drawText("გეოდინო: ხულიგანური პარკური",W/2,190f,paint);paint.textSize=18f;c.drawText("SPACE / ENTER — დაწყება",W/2,245f,paint);paint.textSize=14f;c.drawText("ისრები / A D გადაადგილება • SPACE / W ხტომა • P პაუზა • R თავიდან • K სროლა",W/2,285f,paint)}
-    private fun drawOverlay(c:Canvas,text:String){paint.color=Color.argb(190,11,14,20);c.drawRect(0f,0f,W,H,paint);paint.color=Color.WHITE;paint.textAlign=Paint.Align.CENTER;paint.textSize=46f;c.drawText(text,W/2,220f,paint);paint.textSize=18f;c.drawText("SPACE / ENTER — თავიდან",W/2,270f,paint)}
+    private fun drawOverlay(c:Canvas,t:String){paint.color=Color.argb(190,11,14,20);c.drawRect(0f,0f,W,H,paint);paint.color=Color.WHITE;paint.textAlign=Paint.Align.CENTER;paint.textSize=46f;c.drawText(t,W/2,220f,paint);paint.textSize=18f;c.drawText("SPACE / ENTER — თავიდან",W/2,270f,paint)}
     private fun drawLevelClear(c:Canvas){paint.color=Color.argb(180,11,14,20);c.drawRect(0f,0f,W,H,paint);paint.color=Color.rgb(255,210,63);paint.textAlign=Paint.Align.CENTER;paint.textSize=40f;c.drawText("დონე გავლილია!",W/2,H/2-10,paint);paint.color=Color.WHITE;paint.textSize=18f;c.drawText("ახალი გამოწერები მოიპოვეთ.",W/2,H/2+26,paint)}
     private fun drawWin(c:Canvas){paint.color=Color.argb(190,11,14,20);c.drawRect(0f,0f,W,H,paint);paint.color=Color.rgb(56,198,255);paint.textAlign=Paint.Align.CENTER;paint.textSize=44f;c.drawText("არხი გადარჩა!",W/2,H/2-50,paint);paint.color=Color.WHITE;paint.textSize=20f;c.drawText("საბოლოო ქულა: $score",W/2,H/2-10,paint);c.drawText("გამოწერების მეტრი: $subs%",W/2,H/2+20,paint);paint.textSize=16f;c.drawText("დააჭირე SPACE თამაშის თავიდან საწყებად",W/2,H/2+60,paint)}
-
-    override fun onTouchEvent(e:MotionEvent):Boolean{val x=(e.x-ox)/scale;val y=(e.y-oy)/scale;when(e.actionMasked){MotionEvent.ACTION_DOWN,MotionEvent.ACTION_POINTER_DOWN->{if(mode==Mode.MENU||mode==Mode.GAME_OVER||mode==Mode.WIN){startGame();return true};if(mode==Mode.PAUSED){mode=Mode.PLAYING;return true};if(y>H-110){when{ x<220->left=true;x<450->right=true;x>700->jump=true }}else if(x>W*.55)shoot()};MotionEvent.ACTION_UP,MotionEvent.ACTION_POINTER_UP,MotionEvent.ACTION_CANCEL->{left=false;right=false;jump=false}};return true}
-
-    override fun dispatchKeyEventPreIme(event: android.view.KeyEvent): Boolean = super.dispatchKeyEventPreIme(event)
+    override fun onKeyDown(keyCode:Int,event:KeyEvent):Boolean{when(keyCode){KeyEvent.KEYCODE_DPAD_LEFT,KeyEvent.KEYCODE_A->left=true;KeyEvent.KEYCODE_DPAD_RIGHT,KeyEvent.KEYCODE_D->right=true;KeyEvent.KEYCODE_SPACE,KeyEvent.KEYCODE_DPAD_UP,KeyEvent.KEYCODE_W->{if(mode==Mode.MENU||mode==Mode.GAME_OVER||mode==Mode.WIN){startGame()}else jump=true};KeyEvent.KEYCODE_P->{if(mode==Mode.PLAYING)mode=Mode.PAUSED else if(mode==Mode.PAUSED)mode=Mode.PLAYING};KeyEvent.KEYCODE_R->restart();KeyEvent.KEYCODE_K->shoot();KeyEvent.KEYCODE_ENTER->{if(mode==Mode.MENU||mode==Mode.GAME_OVER||mode==Mode.WIN)startGame();else if(mode==Mode.PAUSED)mode=Mode.PLAYING};else->return super.onKeyDown(keyCode,event)};return true}
+    override fun onKeyUp(keyCode:Int,event:KeyEvent):Boolean{when(keyCode){KeyEvent.KEYCODE_DPAD_LEFT,KeyEvent.KEYCODE_A->left=false;KeyEvent.KEYCODE_DPAD_RIGHT,KeyEvent.KEYCODE_D->right=false;KeyEvent.KEYCODE_SPACE,KeyEvent.KEYCODE_DPAD_UP,KeyEvent.KEYCODE_W->jump=false};return true}
+    override fun onTouchEvent(e:MotionEvent):Boolean{val x=(e.x-ox)/scale;val y=(e.y-oy)/scale;when(e.actionMasked){MotionEvent.ACTION_DOWN,MotionEvent.ACTION_POINTER_DOWN->{if(mode==Mode.MENU||mode==Mode.GAME_OVER||mode==Mode.WIN){startGame();return true};if(mode==Mode.PAUSED){mode=Mode.PLAYING;return true};if(y>H-110){when{x<220->left=true;x<450->right=true;x>700->jump=true}}else if(x>W*.55)shoot()};MotionEvent.ACTION_UP,MotionEvent.ACTION_POINTER_UP,MotionEvent.ACTION_CANCEL->{left=false;right=false;jump=false}};return true}
 }
