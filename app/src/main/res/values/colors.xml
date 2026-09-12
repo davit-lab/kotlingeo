@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ink">#0B0E14</color>
+    <color name="panel">#141826</color>
+    <color name="blue">#38C6FF</color>
+    <color name="blue_dark">#1A6FA8</color>
+    <color name="pink">#FF3D6E</color>
+    <color name="pink_dark">#C21F4A</color>
+    <color name="yellow">#FFD23F</color>
+    <color name="cream">#F4ECD8</color>
+</resources>
